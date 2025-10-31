@@ -3,6 +3,24 @@ let waypoints = [];
 let markers = [];
 let polyline = null;
 
+// Giới hạn khoảng cách (đơn vị: mét)
+const MAX_DISTANCE_METERS = 1000;
+
+// Hàm tính khoảng cách giữa 2 điểm (theo Haversine)
+function distanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000; // bán kính Trái Đất (m)
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) *
+    Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+
 function initMap() {
     map = new google.maps.Map(document.getElementById("map"), {
         center: { lat: 16.0659092, lng: 108.1609844 },
@@ -14,33 +32,44 @@ function initMap() {
         addWaypoint(event.latLng);
     });
 }
+
 function addWaypoint(location) {
-    let idx = markers.length;
+  // Nếu đã có ít nhất 1 waypoint
+  if (waypoints.length > 0) {
+    const last = waypoints[waypoints.length - 1];
+    const dist = distanceMeters(last.lat, last.lng, location.lat(), location.lng());
+    
+    if (dist > MAX_DISTANCE_METERS) {
+      alert(`This point is ${dist.toFixed(1)} m (> ${MAX_DISTANCE_METERS} m) from the previous point — invalid waypoint!!!`);
+      return; // k them waypoint
+    }
+  }
 
-    let marker = new google.maps.Marker({
-        position: location,
-        map: map,
-        label: `${idx + 1}`,
-        draggable: true   // 🔥 Cho phép kéo marker
-    });
+  // Nếu hợp lệ thì thêm như bình thường
+  let idx = markers.length;
+  let marker = new google.maps.Marker({
+    position: location,
+    map: map,
+    label: `${idx + 1}`,
+    draggable: true
+  });
 
-    markers.push(marker);
-    waypoints.push({
-        lat: location.lat(),
-        lng: location.lng(),
-        speed: 1.0,
-        hold_time: 2
-    });
+  markers.push(marker);
+  waypoints.push({
+    lat: location.lat(),
+    lng: location.lng(),
+    speed: 1.0,
+    hold_time: 2
+  });
 
-    // Khi kéo xong thì cập nhật lại waypoint
-    marker.addListener("dragend", function(event) {
-        let newPos = event.latLng;
-        waypoints[idx].lat = newPos.lat();
-        waypoints[idx].lng = newPos.lng();
-        drawPolyline(); // vẽ lại polyline
-    });
-
+  marker.addListener("dragend", function(event) {
+    let newPos = event.latLng;
+    waypoints[idx].lat = newPos.lat();
+    waypoints[idx].lng = newPos.lng();
     drawPolyline();
+  });
+
+  drawPolyline();
 }
 
 function drawPolyline() {
