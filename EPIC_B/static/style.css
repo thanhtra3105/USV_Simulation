@@ -458,10 +458,6 @@ body {
   padding-right: 20px;
 }
 
-/* Ẩn Canvas Chart.js (Nếu bạn sử dụng mô phỏng) */
-/* #qualityHistoryChart { display: none; } */
-
-
 /* Mô phỏng Trục Y thủ công (Nếu bạn sử dụng ảnh mô phỏng) */
 .chart-y-labels {
   position: absolute;

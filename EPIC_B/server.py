@@ -2,9 +2,8 @@ from flask import Flask, request, jsonify, render_template, Response
 from pymavlink import mavutil
 import os, time
 from flask_cors import CORS
-from pyngrok import ngrok
 
-from picamera2 import Picamera2
+# from picamera2 import Picamera2
 import cv2
 
 app = Flask(__name__)
@@ -27,15 +26,15 @@ master = None
 def get_master(timeout=10):
     global master
     if master is None or not master.port:  # nếu chưa có hoặc mất kết nối
-        print(f"🔌 Connecting to serial: {VEHICLE_PORT} @ {VEHICLE_BAUD}")
-        master = mavutil.mavlink_connection(VEHICLE_PORT, baud=VEHICLE_BAUD)
+        # print(f"Connecting to serial: {VEHICLE_PORT} @ {VEHICLE_BAUD}")
+        master = mavutil.mavlink_connection('udp:127.0.0.1:14540')
         try:
             hb = master.wait_heartbeat(timeout=timeout)
             if not hb:
-                raise Exception("❌ Không nhận được HEARTBEAT")
-            print(f"✅ Heartbeat from system: {master.target_system}, component: {master.target_component}")
+                raise Exception(" Không nhận được HEARTBEAT")
+            print(f"Heartbeat from system: {master.target_system}, component: {master.target_component}")
         except Exception as e:
-            raise Exception(f"❌ Kết nối thất bại: {e}")
+            raise Exception(f"Kết nối thất bại: {e}")
     return master
 
 # =============================
@@ -50,7 +49,7 @@ def send_mission_via_mavlink(master, mission):
     time.sleep(1)
 
     master.mav.mission_count_send(master.target_system, master.target_component, wp_count)
-    print(f"📤 Sending MISSION_COUNT={wp_count}")
+    print(f"Sending MISSION_COUNT={wp_count}")
 
     for seq, wp in enumerate(mission):
         lat = int(wp["lat"] * 1e7)
@@ -68,12 +67,12 @@ def send_mission_via_mavlink(master, mission):
             hold_time, 0, 0, 0,
             lat, lon, alt
         )
-        print(f"   ✅ Sent WP {seq+1}: lat={wp['lat']}, lon={wp['lng']}")
+        print(f"Sent WP {seq+1}: lat={wp['lat']}, lon={wp['lng']}")
         time.sleep(0.5)
-    time.sleep(1)
-    msg = master.recv_match(type='MISSION_ACK', timeout=ACK_TIMEOUT)
+    time.sleep(1.5)
+    msg = master.recv_match(type="MISSION_ACK")
     if msg:
-        print(f"🎉 Got final MISSION_ACK: {msg}")
+        print(f"Got final MISSION_ACK: {msg}")
         return {"success": True, "message": "Mission upload complete", "ack": msg.to_dict()}
     else:
         return {"success": False, "message": "No MISSION_ACK received"}
@@ -91,50 +90,50 @@ def telemetry():
 
 # ----------------Stream video ------------
 
-def gen_frames():
-    # global frame_count, curent_time, prev_time
-    try:
+# def gen_frames():
+#     # global frame_count, curent_time, prev_time
+#     try:
         
-        global camera
-        camera.close()
-    except Exception:
-        pass
-    # Khởi tạo camera
-    camera = Picamera2()
-    camera.configure(camera.create_preview_configuration(main={"size": (640, 480)}))
-    camera.start()
-    frame_count = 0
-    prev_time = time.time()
-    fps = 1
-    while True:
-        frame = camera.capture_array()
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        # --- Tính FPS mỗi 1 giây ---
-        frame_count += 1
-        current_time = time.time()
-        elapsed = current_time - prev_time
-        if elapsed >= 1.0:
-            fps = frame_count / elapsed
-            frame_count = 0
-            prev_time = current_time
+#         global camera
+#         camera.close()
+#     except Exception:
+#         pass
+#     # Khởi tạo camera
+#     camera = Picamera2()
+#     camera.configure(camera.create_preview_configuration(main={"size": (640, 480)}))
+#     camera.start()
+#     frame_count = 0
+#     prev_time = time.time()
+#     fps = 1
+#     while True:
+#         frame = camera.capture_array()
+#         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+#         # --- Tính FPS mỗi 1 giây ---
+#         frame_count += 1
+#         current_time = time.time()
+#         elapsed = current_time - prev_time
+#         if elapsed >= 1.0:
+#             fps = frame_count / elapsed
+#             frame_count = 0
+#             prev_time = current_time
 
-        # --- Vẽ FPS lên khung hình ---
-        cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+#         # --- Vẽ FPS lên khung hình ---
+#         cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
+#                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        _, buffer = cv2.imencode('.jpg', frame)
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+#         _, buffer = cv2.imencode('.jpg', frame)
+#         yield (b'--frame\r\n'
+#                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(gen_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+# @app.route('/video_feed')
+# def video_feed():
+#     return Response(gen_frames(),
+#                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
-@app.route("/stream", methods=["GET"])
-def stream():
-    return render_template("stream.html")
+# @app.route("/stream", methods=["GET"])
+# def stream():
+#     return render_template("stream.html")
 
 sensor_data = {
     "ph" : None,
@@ -189,7 +188,7 @@ def upload_mission():
     if len(mission) > 0:
         first_wp = mission[0].copy()
         mission.insert(0, first_wp)
-        print(f"🔁 Added duplicate first WP: {first_wp}")
+        print(f" Added duplicate first WP: {first_wp}")
 
     try:
         master = get_master()
@@ -250,19 +249,19 @@ def get_status():
 def start_mission():
     try:
         master = get_master()
-        master.arducopter_arm()
-        master.motors_armed_wait()
-        print("✅ Vehicle armed")
+        # master.arducopter_arm()
+        # master.motors_armed_wait()
+        # print("Vehicle armed")
 
-        master.mav.mission_set_current_send(master.target_system, master.target_component, 1)
-        print("📌 Mission set to start from waypoint 1")
+        # master.mav.mission_set_current_send(master.target_system, master.target_component, 1)
+        # print("Mission set to start from waypoint 1")
 
-        master.set_mode("GUIDED")
-        time.sleep(1)
-        print("🔄 Mode set to GUIDED")
+        # master.set_mode("GUIDED")
+        # time.sleep(1)
+        # print("Mode set to GUIDED")
 
-        master.set_mode("AUTO")
-        print("✅ Mode set to AUTO")
+        # master.set_mode("AUTO")
+        # print("Mode set to AUTO")
 
         master.mav.command_long_send(
             master.target_system,
@@ -271,7 +270,7 @@ def start_mission():
             0,
             0, 0, 0, 0, 0, 0, 0
         )
-        print("🚀 Mission started")
+        print("Mission started")
 
         return jsonify({"success": True, "message": "Mission started"})
     except Exception as e:
@@ -290,7 +289,7 @@ def vehicle_position():
         lat = pos["lat"] / 1e7
         lon = pos["lon"] / 1e7
         alt = pos["alt"] / 1000.0
-
+        print(f"lat: {lat}, lon:{lon}");
         return jsonify({
             "success": True,
             "lat": lat,
@@ -300,11 +299,31 @@ def vehicle_position():
     except Exception as e:
         return jsonify({"success": False, "message": f"Position failed: {e}"}), 500
 
+
+@app.route("/vehicle-info", methods=["GET"])
+def vehicle_info():
+    try:
+        master = get_master()
+        msg_bat = master.recv_match(type="BATTERY_STATUS", blocking=True)
+        msg_speed_heading = master.recv_match(type="VFR_HUD", blocking= True)
+        if not msg_bat or not msg_speed_heading:
+            return jsonify({"success": False, "message": "No vehicel data"}), 500
+        battery_remaining  = msg_bat.battery_remaining
+        speed = msg_speed_heading.groundspeed
+        heading = msg_speed_heading.heading
+
+        print(battery_remaining)
+        return jsonify({
+            "success": True,
+            "battery": battery_remaining,
+            "speed": speed,
+            "heading": heading,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Battery failed: {e}"}), 500
+
 # =============================
 # Main
 # =============================
 if __name__ == "__main__":
-    # ngrok.kill()
-    # url = ngrok.connect(5000)
-    # print(url)
     app.run(host="0.0.0.0", port=5000, debug=False)

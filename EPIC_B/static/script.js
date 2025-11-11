@@ -21,17 +21,40 @@ function distanceMeters(lat1, lon1, lat2, lon2) {
 }
 
 
-function initMap() {
+async function initMap() {
+  try {
+    // Gọi API để lấy vị trí ban đầu từ server (đọc MAVLink GPS)
+    const res = await fetch("/vehicle-position");
+    const data = await res.json();
+
+    let initLat = 16.0659092;  // Giá trị mặc định nếu đọc lỗi
+    let initLon = 108.1609844;
+
+    if (data.success && data.lat && data.lon) {
+      initLat = data.lat;
+      initLon = data.lon;
+      console.log(`Init map at GPS: ${initLat}, ${initLon}`);
+    } else {
+      console.warn("Không lấy được vị trí GPS, dùng tọa độ mặc định.");
+    }
+
+    // Khởi tạo Google Map tại vị trí GPS
     map = new google.maps.Map(document.getElementById("map"), {
-        center: { lat: 16.0659092, lng: 108.1609844 },
-        zoom: 16,
-        gestureHandling: "greedy" // Cho phép zoom bằng scroll luôn
+      center: { lat: initLat, lng: initLon },
+      zoom: 17,
+      gestureHandling: "greedy"
     });
 
+    // Cho phép click thêm waypoint
     map.addListener("click", (event) => {
-        addWaypoint(event.latLng);
+      addWaypoint(event.latLng);
     });
+
+  } catch (err) {
+    console.error("Failed while get gps:", err);
+  }
 }
+
 
 function addWaypoint(location) {
   // Nếu đã có ít nhất 1 waypoint
@@ -107,9 +130,9 @@ function updateProgress(percent, success=false) {
   const bar = document.getElementById("progress-bar");
   bar.style.width = percent + "%";
   if (success) {
-    bar.style.background = "green"; // ✅ thành công thì đổi sang xanh
+    bar.style.background = "green"; // thành công thì đổi sang xanh
   } else {
-    bar.style.background = "red";   // ❌ mặc định hoặc thất bại là đỏ
+    bar.style.background = "red";   //
   }
 }
 
@@ -131,14 +154,14 @@ async function uploadMission() {
     const data = await res.json();
 
     if (data.success) {
-      updateProgress(100, true); // 🎉 full xanh khi thành công
+      updateProgress(100, true); // full xanh khi thành công
     } else {
       updateProgress(100, false); // full đỏ nếu thất bại
-      alert("❌ Failed: " + data.message);
+      alert("Failed: " + data.message);
     }
   } catch (err) {
     updateProgress(100, false);
-    alert("⚠️ Error: " + err);
+    alert("Error: " + err);
   }
 }
 
@@ -175,6 +198,34 @@ let boatIcon = {
   anchor: new google.maps.Point(20, 20)     // tâm icon nằm ở giữa
 };
 
+async function updateDashboard() {
+  try {
+    const res = await fetch("/vehicle-info");
+    const data = await res.json();
+
+    if (data.success) {
+      // Battery + Speed
+      document.getElementById("battery-level").textContent = data.battery + " %";
+      document.getElementById("speed").textContent = data.speed.toFixed(3) + " m/s";
+
+      // === Cập nhật kim la bàn ===
+      if (data.heading !== undefined) {
+        const needle = document.getElementById("compass-needle");
+        // PX4 heading: 0° là Bắc, tăng theo chiều kim đồng hồ
+        // CSS rotate() cũng quay theo chiều kim đồng hồ, nên chỉ cần đảo dấu nếu gốc khác
+        needle.style.transform = `translate(-50%, -50%) rotate(${data.heading}deg)`;
+      }
+    } else {
+      document.getElementById("battery-level").textContent = "-- %";
+    }
+  } catch (err) {
+    console.error("Battery fetch error:", err);
+    document.getElementById("battery-level").textContent = "-- %";
+  }
+}
+
+
+
 function updateVehiclePosition() {
   fetch("/vehicle-position")
     .then(res => res.json())
@@ -198,8 +249,8 @@ function updateVehiclePosition() {
 }
 
 // gọi update liên tục mỗi 2 giây
-setInterval(updateVehiclePosition, 2000);
-
+setInterval(updateVehiclePosition, 500);
+setInterval(updateDashboard, 2000);
 // Khởi tạo map khi load
 window.onload = initMap;
 
