@@ -2,9 +2,9 @@ from flask import Flask, request, jsonify, render_template, Response
 from pymavlink import mavutil
 import os, time
 from flask_cors import CORS
-
-# from picamera2 import Picamera2
-import cv2
+from threading import Lock
+mavlink_lock = Lock()
+polling_enabled = True
 
 app = Flask(__name__)
 CORS(app)
@@ -17,7 +17,6 @@ VEHICLE_BAUD = 57600
 ACK_TIMEOUT = 10
 
 master = None
-
 
 
 # =============================
@@ -43,19 +42,18 @@ def get_master(timeout=10):
 def send_mission_via_mavlink(master, mission):
     wp_count = len(mission)
     if wp_count == 0:
-        return {"success": False, "message": "Mission trống"}
+        return {"success": False, "message": "Empty mission"}
 
     master.mav.mission_clear_all_send(master.target_system, master.target_component)
     time.sleep(1)
 
     master.mav.mission_count_send(master.target_system, master.target_component, wp_count)
     print(f"Sending MISSION_COUNT={wp_count}")
-
     for seq, wp in enumerate(mission):
         lat = int(wp["lat"] * 1e7)
         lon = int(wp["lng"] * 1e7)
         alt = 0
-        hold_time = wp.get("hold_time", 0)
+        # hold_time = wp.get("hold_time", 0)
 
         master.mav.mission_item_int_send(
             master.target_system,
@@ -64,13 +62,13 @@ def send_mission_via_mavlink(master, mission):
             mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
             mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
             0, 1,  # current, autocontinue
-            hold_time, 0, 0, 0,
+            5, 0, 0, 0,
             lat, lon, alt
         )
         print(f"Sent WP {seq+1}: lat={wp['lat']}, lon={wp['lng']}")
-        time.sleep(0.5)
-    time.sleep(1.5)
-    msg = master.recv_match(type="MISSION_ACK")
+    
+    msg = master.recv_match(type="MISSION_ACK", blocking=True, timeout=1)
+    time.sleep(1)
     if msg:
         print(f"Got final MISSION_ACK: {msg}")
         return {"success": True, "message": "Mission upload complete", "ack": msg.to_dict()}
@@ -144,10 +142,13 @@ sensor_data = {
 
 @app.route("/api/telemetry", methods=["GET"])
 def api_telemetry():
-    global ph, do, cod, tss
+    global sensor_data, polling_enabled
     try:
         master = get_master()
         msg = master.recv_match(type="NAMED_VALUE_FLOAT", blocking=True, timeout=2)
+        with mavlink_lock:
+            if not polling_enabled:
+                return jsonify({"success": False, "message": "Busy uploading mission"}), 503
         
         if not msg:
             return jsonify({"success": False, "message": "No Sensor Data"}), 500
@@ -180,88 +181,32 @@ def api_telemetry():
 
 @app.route("/upload-mission", methods=["POST"])
 def upload_mission():
+    global polling_enabled
+
     data = request.get_json()
     if not data or "mission" not in data:
         return jsonify({"success": False, "message": "Missing mission in payload"}), 400
 
     mission = data["mission"]
-    if len(mission) > 0:
-        first_wp = mission[0].copy()
-        mission.insert(0, first_wp)
-        print(f" Added duplicate first WP: {first_wp}")
-
     try:
         master = get_master()
-        res = send_mission_via_mavlink(master, mission)
-        return jsonify(res), (200 if res["success"] else 500)
+        # ===== STOP POLLING =====
+        polling_enabled = False
+        time.sleep(0.2)    # đợi các API đang chạy dừng hẳn
+
+        # ===== UPLOAD MISSION =====
+        with mavlink_lock:    
+            res = send_mission_via_mavlink(master, mission)
+            polling_enabled = True   
+            return jsonify(res), (200 if res["success"] else 500)
     except Exception as e:
         return jsonify({"success": False, "message": f"Exception: {e}"}), 503
-
-@app.route("/arm", methods=["POST"])
-def arm_vehicle():
-    try:
-        master = get_master()
-        master.arducopter_arm()
-        master.motors_armed_wait()
-        return jsonify({"success": True, "message": "Vehicle armed"})
-    except Exception as e:
-        return jsonify({"success": False, "message": f"Arm failed: {e}"}), 500
-
-@app.route("/disarm", methods=["POST"])
-def disarm_vehicle():
-    try:
-        master = get_master()
-        master.arducopter_disarm()
-        master.motors_disarmed_wait()
-        return jsonify({"success": True, "message": "Vehicle disarmed"})
-    except Exception as e:
-        return jsonify({"success": False, "message": f"Disarm failed: {e}"}), 500
-
-@app.route("/set-mode", methods=["POST"])
-def set_mode():
-    data = request.get_json()
-    if not data or "mode" not in data:
-        return jsonify({"success": False, "message": "Missing mode"}), 400
-
-    mode = data["mode"].upper()
-    try:
-        master = get_master()
-        master.set_mode(mode)
-        return jsonify({"success": True, "message": f"Mode set to {mode}"})
-    except Exception as e:
-        return jsonify({"success": False, "message": f"Set mode failed: {e}"}), 500
-
-@app.route("/status", methods=["GET"])
-def get_status():
-    try:
-        master = get_master()
-        hb = master.recv_match(type="HEARTBEAT", blocking=True, timeout=5)
-        batt = master.recv_match(type="BATTERY_STATUS", blocking=True, timeout=5)
-        return jsonify({
-            "success": True,
-            "system": hb.to_dict() if hb else {},
-            "battery": batt.to_dict() if batt else {}
-        })
-    except Exception as e:
-        return jsonify({"success": False, "message": f"Status failed: {e}"}), 500
+    
 
 @app.route("/start-mission", methods=["POST"])
 def start_mission():
     try:
         master = get_master()
-        # master.arducopter_arm()
-        # master.motors_armed_wait()
-        # print("Vehicle armed")
-
-        # master.mav.mission_set_current_send(master.target_system, master.target_component, 1)
-        # print("Mission set to start from waypoint 1")
-
-        # master.set_mode("GUIDED")
-        # time.sleep(1)
-        # print("Mode set to GUIDED")
-
-        # master.set_mode("AUTO")
-        # print("Mode set to AUTO")
 
         master.mav.command_long_send(
             master.target_system,
@@ -271,7 +216,7 @@ def start_mission():
             0, 0, 0, 0, 0, 0, 0
         )
         print("Mission started")
-
+        time.sleep(1)
         return jsonify({"success": True, "message": "Mission started"})
     except Exception as e:
         return jsonify({"success": False, "message": f"Start mission failed: {e}"}), 500
@@ -280,22 +225,24 @@ def start_mission():
 def vehicle_position():
     try:
         master = get_master()
-        msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=2)
+        with mavlink_lock:
+            if not polling_enabled:
+                return jsonify({"success": False, "message": "Busy uploading mission"}), 503
+            msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=5)
+            if not msg:
+                return jsonify({"success": False, "message": "No GPS data"}), 500
 
-        if not msg:
-            return jsonify({"success": False, "message": "No GPS data"}), 500
-
-        pos = msg.to_dict()
-        lat = pos["lat"] / 1e7
-        lon = pos["lon"] / 1e7
-        alt = pos["alt"] / 1000.0
-        print(f"lat: {lat}, lon:{lon}");
-        return jsonify({
-            "success": True,
-            "lat": lat,
-            "lon": lon,
-            "alt": alt
-        })
+            pos = msg.to_dict()
+            lat = pos["lat"] / 1e7
+            lon = pos["lon"] / 1e7
+            alt = pos["alt"] / 1000.0
+            # print(f"lat: {lat}, lon:{lon}");
+            return jsonify({
+                "success": True,
+                "lat": lat,
+                "lon": lon,
+                "alt": alt
+            })
     except Exception as e:
         return jsonify({"success": False, "message": f"Position failed: {e}"}), 500
 
@@ -304,23 +251,63 @@ def vehicle_position():
 def vehicle_info():
     try:
         master = get_master()
-        msg_bat = master.recv_match(type="BATTERY_STATUS", blocking=True)
-        msg_speed_heading = master.recv_match(type="VFR_HUD", blocking= True)
-        if not msg_bat or not msg_speed_heading:
-            return jsonify({"success": False, "message": "No vehicel data"}), 500
-        battery_remaining  = msg_bat.battery_remaining
-        speed = msg_speed_heading.groundspeed
-        heading = msg_speed_heading.heading
+        with mavlink_lock:
+            if not polling_enabled:
+                return jsonify({"success": False, "message": "Busy uploading mission"}), 503
+        
+            msg_bat = master.recv_match(type="BATTERY_STATUS", blocking=True)
+            msg_speed_heading = master.recv_match(type="VFR_HUD", blocking= True)
+            if not msg_bat or not msg_speed_heading:
+                return jsonify({"success": False, "message": "No vehicel data"}), 500
+            battery_remaining  = msg_bat.battery_remaining
+            speed = msg_speed_heading.groundspeed
+            heading = msg_speed_heading.heading
 
-        print(battery_remaining)
-        return jsonify({
-            "success": True,
-            "battery": battery_remaining,
-            "speed": speed,
-            "heading": heading,
-        })
+            print(battery_remaining)
+            return jsonify({
+                "success": True,
+                "battery": battery_remaining,
+                "speed": speed,
+                "heading": heading,
+            })
     except Exception as e:
         return jsonify({"success": False, "message": f"Battery failed: {e}"}), 500
+
+mission_current = None
+mission_total = None
+mission_state = None
+
+@app.route("/mission-progress", methods=["GET"])
+def misson_progress():
+    global mission_current, mission_state, mission_total
+    try:
+        master = get_master()
+        with mavlink_lock:
+            if not polling_enabled:
+                return jsonify({"success": False, "message": "Busy uploading mission"}), 503
+            msg = master.recv_match(type="MISSION_CURRENT", blocking=True, timeout=2)
+        
+            if msg:
+                print(msg)
+                mission_current = msg.seq+1
+                mission_total = msg.total
+                mission_state = msg.mission_state
+                return jsonify({
+                "success": True,
+                "mission_current": mission_current,
+                "mission_total": mission_total,
+                "mission_state": mission_state,
+                })
+            else:
+                print("Lỗi: Không nhận được MISSION_CURRENT")
+                return jsonify({
+                "success": False,
+                "mission_current": mission_current,
+                "mission_total": mission_total,
+                "mission_state": mission_state,
+                })
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Get mission failed: {e}"}), 500
 
 # =============================
 # Main

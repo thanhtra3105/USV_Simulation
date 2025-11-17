@@ -202,12 +202,10 @@ async function updateDashboard() {
   try {
     const res = await fetch("/vehicle-info");
     const data = await res.json();
-
     if (data.success) {
       // Battery + Speed
       document.getElementById("battery-level").textContent = data.battery + " %";
       document.getElementById("speed").textContent = data.speed.toFixed(3) + " m/s";
-
       // === Cập nhật kim la bàn ===
       if (data.heading !== undefined) {
         const needle = document.getElementById("compass-needle");
@@ -223,7 +221,61 @@ async function updateDashboard() {
     document.getElementById("battery-level").textContent = "-- %";
   }
 }
+let ms_current =0;
+let ms_total =0;
+let ms_state =0;
+async function updateMissionProgress() {
+  try {
+    const res = await fetch("/mission-progress");
+    const data = await res.json();
 
+    const label = document.getElementById("waypoint-index");
+
+    if (data.success) {
+      ms_current = data.mission_current;
+      ms_total = data.mission_total;
+      ms_state = data.mission_state;
+
+      const label = document.getElementById("waypoint-index");
+      let color = "";
+      let text = `${ms_current} / ${ms_total}`;
+
+      switch(ms_state) {
+          case 2: // not started
+              color = "red";
+              break;
+          case 3: // executing
+              color = "yellow";
+              break;
+          case 5: // finished
+              color = "green";
+              break;
+          default:
+              color = "gray";
+      }
+
+      const dot = document.createElement("span");
+      dot.style.backgroundColor = color;
+      dot.style.width = "20px";
+      dot.style.height = "20px";
+      dot.style.borderRadius = "50%";
+      dot.style.display = "inline-block";
+      dot.style.marginRight = "6px";
+      dot.style.verticalAlign = "middle";
+
+      label.innerHTML = "";
+      label.appendChild(dot);
+      label.appendChild(document.createTextNode(text));
+  }
+
+ else {
+      // không crash UI
+      // label.innerText = "-- / --";
+    }
+  } catch (err) {
+    console.error("Mission progress update failed:", err);
+  }
+}
 
 
 function updateVehiclePosition() {
@@ -251,6 +303,8 @@ function updateVehiclePosition() {
 // gọi update liên tục mỗi 2 giây
 setInterval(updateVehiclePosition, 500);
 setInterval(updateDashboard, 2000);
+setInterval(updateMissionProgress, 2000);
+
 // Khởi tạo map khi load
 window.onload = initMap;
 
