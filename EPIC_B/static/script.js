@@ -355,9 +355,9 @@ async function loadMissionFromPX4() {
 }
 
 // gọi update liên tục mỗi 2 giây
-setInterval(updateVehiclePosition, 500);
+// setInterval(updateVehiclePosition, 50);
 setInterval(updateDashboard, 2000);
-// setInterval(updateMissionProgress, 2000);
+// setInterval(updateMissionProgress, 1000);
 
 // Khởi tạo map khi load
 window.onload = initMap;

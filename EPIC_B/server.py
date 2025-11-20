@@ -40,6 +40,12 @@ log_buffer = {
     "mission-progress": []
 }
 
+HEADERS = {
+    "vehicle-position": ["timestamp", "endpoint", "latency_ms", "status"],
+    "vehicle-info": ["timestamp", "endpoint", "latency_ms", "status"],
+    "mission-progress": ["timestamp", "endpoint", "latency_ms", "status"],
+}
+
 
 def add_latency_sample(endpoint, latency, status="success"):
     global log_buffer
@@ -47,46 +53,35 @@ def add_latency_sample(endpoint, latency, status="success"):
     if len(log_buffer) > MAX_LOG_LINES:
         log_buffer[endpoint] = log_buffer[endpoint][-MAX_LOG_LINES:]
 
+
 def flush_log_buffer():
     global log_buffer
     while True:
-        time.sleep(2)  # ghi file mỗi 2 giây
+        time.sleep(2)
+
+        # ----- VEHICLE POSITION -----
         if log_buffer["vehicle-position"]:
-            with open(f"logs/api_latency/position_latency.csv", "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerows(log_buffer["vehicle-position"])
+            filename = "logs/api_latency/position_latency.csv"
+            write_with_header(filename, HEADERS["vehicle-position"], log_buffer["vehicle-position"])
+
+        # ----- VEHICLE INFO -----
         if log_buffer["vehicle-info"]:
-            with open(f"logs/api_latency/vehicle_info_latency.csv", "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerows(log_buffer["vehicle-info"])
+            filename = "logs/api_latency/vehicle_info_latency.csv"
+            write_with_header(filename, HEADERS["vehicle-info"], log_buffer["vehicle-info"])
+
+        # ----- MISSION PROGRESS -----
         if log_buffer["mission-progress"]:
-            with open(f"logs/api_latency/mission_progress_latency.csv", "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerows(log_buffer["mission-progress"])
+            filename = "logs/api_latency/mission_progress_latency.csv"
+            write_with_header(filename, HEADERS["mission-progress"], log_buffer["mission-progress"])
 
+def write_with_header(filename, header, rows):
+    file_exists = os.path.exists(filename)
+    file_empty = (not file_exists) or os.path.getsize(filename) == 0
 
-
-# def log_latency(filename, endpoint, latency, status="success"):
-#     file_path = f"logs/api_latency/{filename}.csv"
-#     rows = []
-
-#     # 1) Đọc file hiện tại nếu tồn tại
-#     if os.path.exists(file_path):
-#         with open(file_path, "r", newline="") as f:
-#             reader = csv.reader(f)
-#             rows = list(reader)
-
-#     # 2) Thêm dòng mới
-#     rows.append([datetime.now(), endpoint, latency, status])
-
-#     # 3) Giữ tối đa MAX_LOG_LINES
-#     if len(rows) > MAX_LOG_LINES:
-#         rows = rows[-MAX_LOG_LINES:]  # lấy 100 dòng cuối
-
-#     # 4) Ghi lại file
-#     with open(file_path, "w", newline="") as f:
-#         writer = csv.writer(f)
-#         writer.writerows(rows)
+    with open(filename, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
 
 
 def log_rtt(command, rtt, success):
@@ -284,7 +279,6 @@ def start_mission():
         return jsonify({"success": False, "message": f"Start mission failed: {e}"}), 500
 
 @app.route("/vehicle-position", methods=["GET"])
-@app.route("/vehicle-position", methods=["GET"])
 def vehicle_position():
     try:
         master = get_master()
@@ -329,15 +323,25 @@ def vehicle_info():
         with mavlink_lock:
             if not polling_enabled:
                 return jsonify({"success": False, "message": "Busy uploading mission"}), 503
-        
+            
+            # ===== Xóa message BATTERY and VFR_HUB cũ trong buffer =====
+            while master.recv_match(type="BATTERY_STATUS", blocking=False):
+                pass
+            while master.recv_match(type="VFR_HUD", blocking=False):
+                pass
+
+            start = time.perf_counter()
             msg_bat = master.recv_match(type="BATTERY_STATUS", blocking=True)
             msg_speed_heading = master.recv_match(type="VFR_HUD", blocking= True)
+            latency_ms = (time.perf_counter() - start) * 1000  # tính latency
+
             if not msg_bat or not msg_speed_heading:
+                add_latency_sample("vehicle-info", latency_ms, "error")
                 return jsonify({"success": False, "message": "No vehicel data"}), 500
             battery_remaining  = msg_bat.battery_remaining
             speed = msg_speed_heading.groundspeed
             heading = msg_speed_heading.heading
-
+            add_latency_sample("vehicle-info", latency_ms)
             # print(battery_remaining)
             return jsonify({
                 "success": True,
@@ -360,10 +364,18 @@ def misson_progress():
         with mavlink_lock:
             if not polling_enabled:
                 return jsonify({"success": False, "message": "Busy uploading mission"}), 503
-            msg = master.recv_match(type="MISSION_CURRENT", blocking=True, timeout=2)
-        
+            
+            # ===== Xóa message GLOBAL_POSITION_INT cũ trong buffer =====
+            while master.recv_match(type="MISSION_CURRENT", blocking=False):
+                pass
+
+            start = time.perf_counter()
+            msg = master.recv_match(type="MISSION_CURRENT", blocking=True)
+            latency_ms = (time.perf_counter() - start)*1000
+
             if msg:
                 # print(msg)
+                add_latency_sample("mission-progress", latency_ms)
                 mission_current = msg.seq+1
                 mission_total = msg.total
                 mission_state = msg.mission_state
@@ -375,6 +387,7 @@ def misson_progress():
                 })
             else:
                 print("Lỗi: Không nhận được MISSION_CURRENT")
+                add_latency_sample("mission-progress", latency_ms, 'error')
                 return jsonify({
                 "success": False,
                 "mission_current": mission_current,
