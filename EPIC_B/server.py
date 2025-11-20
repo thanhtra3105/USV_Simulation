@@ -41,38 +41,62 @@ log_buffer = {
 }
 
 HEADERS = {
-    "vehicle-position": ["timestamp", "endpoint", "latency_ms", "status"],
-    "vehicle-info": ["timestamp", "endpoint", "latency_ms", "status"],
-    "mission-progress": ["timestamp", "endpoint", "latency_ms", "status"],
+    "vehicle-position": ["timestamp", "endpoint", "latency_ms", "status", "loss_ratio"],
+    "vehicle-info": ["timestamp", "endpoint", "latency_ms", "status", "loss_ratio"],
+    "mission-progress": ["timestamp", "endpoint", "latency_ms", "status", "loss_ratio"],
+}
+
+
+packet_stats = {
+    "vehicle-position": {"sent": 0, "received": 0},
+    "vehicle-info": {"sent": 0, "received": 0},
+    "mission-progress": {"sent": 0, "received": 0}
 }
 
 
 def add_latency_sample(endpoint, latency, status="success"):
-    global log_buffer
-    log_buffer[endpoint].append([datetime.now(), endpoint, latency, status])
-    if len(log_buffer) > MAX_LOG_LINES:
+    global log_buffer, packet_stats
+    packet_stats[endpoint]["sent"] += 1
+    if status == "success":
+        packet_stats[endpoint]["received"] += 1
+
+    loss_ratio = 0 if packet_stats[endpoint]["sent"] == 0 else (1 - packet_stats[endpoint]["received"]/packet_stats[endpoint]["sent"])
+    log_buffer[endpoint].append([datetime.now(), endpoint, latency, status, loss_ratio])
+
+    if len(log_buffer[endpoint]) > MAX_LOG_LINES:
         log_buffer[endpoint] = log_buffer[endpoint][-MAX_LOG_LINES:]
 
+
+# def flush_log_buffer():
+#     global log_buffer
+#     while True:
+#         time.sleep(2)
+
+#         # ----- VEHICLE POSITION -----
+#         if log_buffer["vehicle-position"]:
+#             filename = "logs/api_latency/position_latency.csv"
+#             write_with_header(filename, HEADERS["vehicle-position"], log_buffer["vehicle-position"])
+
+#         # ----- VEHICLE INFO -----
+#         if log_buffer["vehicle-info"]:
+#             filename = "logs/api_latency/vehicle_info_latency.csv"
+#             write_with_header(filename, HEADERS["vehicle-info"], log_buffer["vehicle-info"])
+
+#         # ----- MISSION PROGRESS -----
+#         if log_buffer["mission-progress"]:
+#             filename = "logs/api_latency/mission_progress_latency.csv"
+#             write_with_header(filename, HEADERS["mission-progress"], log_buffer["mission-progress"])
 
 def flush_log_buffer():
     global log_buffer
     while True:
         time.sleep(2)
+        for endpoint in log_buffer:
+            if log_buffer[endpoint]:
+                filename = f"logs/latency_and_loss/{endpoint}_latency.csv"
+                os.makedirs(os.path.dirname(filename), exist_ok=True)
+                write_with_header(filename, HEADERS[endpoint], log_buffer[endpoint])
 
-        # ----- VEHICLE POSITION -----
-        if log_buffer["vehicle-position"]:
-            filename = "logs/api_latency/position_latency.csv"
-            write_with_header(filename, HEADERS["vehicle-position"], log_buffer["vehicle-position"])
-
-        # ----- VEHICLE INFO -----
-        if log_buffer["vehicle-info"]:
-            filename = "logs/api_latency/vehicle_info_latency.csv"
-            write_with_header(filename, HEADERS["vehicle-info"], log_buffer["vehicle-info"])
-
-        # ----- MISSION PROGRESS -----
-        if log_buffer["mission-progress"]:
-            filename = "logs/api_latency/mission_progress_latency.csv"
-            write_with_header(filename, HEADERS["mission-progress"], log_buffer["mission-progress"])
 
 def write_with_header(filename, header, rows):
     file_exists = os.path.exists(filename)
@@ -85,14 +109,26 @@ def write_with_header(filename, header, rows):
 
 
 def log_rtt(command, rtt, success):
-    with open("logs/command_rtt.csv", "a", newline="") as f:
+    with open("logs/command_rtt/command_rtt.csv", "a", newline="") as f:
         w = csv.writer(f)
         w.writerow([datetime.now(), command, rtt, success])
 
-def log_telemetry_loss(received, total):
-    with open("logs/telemetry_loss.csv", "a", newline="") as f:
-        w = csv.writer(f)
-        w.writerow([datetime.now(), received, total])
+def log_packet_loss(endpoint):
+    stats = packet_stats[endpoint]
+    received = stats['received']
+    total = stats['sent']
+    loss_ratio = 0 if total == 0 else (1 - received / total)
+
+    filename = f"logs/packet_loss/{endpoint}_loss.csv"
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    file_exists = os.path.exists(filename)
+    file_empty = (not file_exists) or os.path.getsize(filename) == 0
+
+    with open(filename, "a", newline="") as f:
+        writer = csv.writer(f)
+        if file_empty:
+            writer.writerow(["timestamp", "received", "total", "loss_ratio"])
+        writer.writerow([datetime.now(), received, total, loss_ratio])
 
 
 # =============================
@@ -119,13 +155,11 @@ def send_mission_via_mavlink(master, mission):
     wp_count = len(mission)
     if wp_count == 0:
         return {"success": False, "message": "Empty mission"}
-
     master.mav.mission_clear_all_send(master.target_system, master.target_component)
-    time.sleep(1)
-
+    # time.sleep(1)
     master.mav.mission_count_send(master.target_system, master.target_component, wp_count)
     print(f"Sending MISSION_COUNT={wp_count}")
-
+    start = time.perf_counter() # do tu khi send waypoint cho den khi nhan ack
     for seq, wp in enumerate(mission):
         lat = int(wp["lat"] * 1e7)
         lon = int(wp["lng"] * 1e7)
@@ -146,8 +180,8 @@ def send_mission_via_mavlink(master, mission):
     # ======================
     # MEASURE RTT: SEND → ACK
     # ======================
-    start = time.perf_counter()
-    msg = master.recv_match(type="MISSION_ACK", blocking=True, timeout=2)
+    
+    msg = master.recv_match(type="MISSION_ACK", blocking=True)
     rtt = (time.perf_counter() - start) * 1000
 
     if msg:
@@ -304,9 +338,8 @@ def vehicle_position():
             lat = pos["lat"] / 1e7
             lon = pos["lon"] / 1e7
             alt = pos["alt"] / 1000.0
-
+            
             add_latency_sample("vehicle-position", latency_ms)
-
             return jsonify({
                 "success": True,
                 "lat": lat,
@@ -314,6 +347,7 @@ def vehicle_position():
                 "alt": alt
             })
     except Exception as e:
+        add_latency_sample("vehicle-position", 0, "error")
         return jsonify({"success": False, "message": f"Position failed: {e}"}), 500
 
 @app.route("/vehicle-info", methods=["GET"])
@@ -324,7 +358,7 @@ def vehicle_info():
             if not polling_enabled:
                 return jsonify({"success": False, "message": "Busy uploading mission"}), 503
             
-            # ===== Xóa message BATTERY and VFR_HUB cũ trong buffer =====
+            # ===== Xóa message BATTERY and VFR_HUD cũ trong buffer =====
             while master.recv_match(type="BATTERY_STATUS", blocking=False):
                 pass
             while master.recv_match(type="VFR_HUD", blocking=False):
@@ -332,17 +366,19 @@ def vehicle_info():
 
             start = time.perf_counter()
             msg_bat = master.recv_match(type="BATTERY_STATUS", blocking=True)
-            msg_speed_heading = master.recv_match(type="VFR_HUD", blocking= True)
+            msg_speed_heading = master.recv_match(type="VFR_HUD", blocking=True)
             latency_ms = (time.perf_counter() - start) * 1000  # tính latency
 
             if not msg_bat or not msg_speed_heading:
                 add_latency_sample("vehicle-info", latency_ms, "error")
-                return jsonify({"success": False, "message": "No vehicel data"}), 500
-            battery_remaining  = msg_bat.battery_remaining
+                return jsonify({"success": False, "message": "No vehicle data"}), 500
+
+            battery_remaining = msg_bat.battery_remaining
             speed = msg_speed_heading.groundspeed
             heading = msg_speed_heading.heading
+
             add_latency_sample("vehicle-info", latency_ms)
-            # print(battery_remaining)
+
             return jsonify({
                 "success": True,
                 "battery": battery_remaining,
@@ -350,6 +386,7 @@ def vehicle_info():
                 "heading": heading,
             })
     except Exception as e:
+        add_latency_sample("vehicle-info", 0, "error")
         return jsonify({"success": False, "message": f"Battery failed: {e}"}), 500
 
 mission_current = None
@@ -365,36 +402,35 @@ def misson_progress():
             if not polling_enabled:
                 return jsonify({"success": False, "message": "Busy uploading mission"}), 503
             
-            # ===== Xóa message GLOBAL_POSITION_INT cũ trong buffer =====
+            # ===== Xóa message MISSION_CURRENT cũ trong buffer =====
             while master.recv_match(type="MISSION_CURRENT", blocking=False):
                 pass
 
             start = time.perf_counter()
             msg = master.recv_match(type="MISSION_CURRENT", blocking=True)
-            latency_ms = (time.perf_counter() - start)*1000
+            latency_ms = (time.perf_counter() - start) * 1000
 
             if msg:
-                # print(msg)
                 add_latency_sample("mission-progress", latency_ms)
-                mission_current = msg.seq+1
+                mission_current = msg.seq + 1
                 mission_total = msg.total
                 mission_state = msg.mission_state
                 return jsonify({
-                "success": True,
-                "mission_current": mission_current,
-                "mission_total": mission_total,
-                "mission_state": mission_state,
+                    "success": True,
+                    "mission_current": mission_current,
+                    "mission_total": mission_total,
+                    "mission_state": mission_state,
                 })
             else:
-                print("Lỗi: Không nhận được MISSION_CURRENT")
-                add_latency_sample("mission-progress", latency_ms, 'error')
+                add_latency_sample("mission-progress", 0, 'error')
                 return jsonify({
-                "success": False,
-                "mission_current": mission_current,
-                "mission_total": mission_total,
-                "mission_state": mission_state,
+                    "success": False,
+                    "mission_current": mission_current,
+                    "mission_total": mission_total,
+                    "mission_state": mission_state,
                 })
     except Exception as e:
+        add_latency_sample("mission-progress", latency_ms, 'error')
         return jsonify({"success": False, "message": f"Get mission failed: {e}"}), 500
 
 @app.route("/get-mission", methods=["GET"])
