@@ -29,6 +29,21 @@
                 </div>
             </div>
         </div>
+        <!-- NÚT CHUYỂN ĐỔI MAP TYPE - Ở DƯỚI MAP -->
+        <div class="absolute bottom-40 right-100 bg-white rounded-lg shadow z-10 flex overflow-hidden">
+        <button onclick="setMapType('roadmap')" id="btn-roadmap" class="map-type-btn active px-3 py-2 text-sm font-medium transition flex items-center" title="Bản đồ thường">
+        <i class="fa-solid fa-map mr-1"></i> Roadmap
+        </button>
+        <button onclick="setMapType('satellite')" id="btn-satellite" class="map-type-btn px-3 py-2 text-sm font-medium transition flex items-center" title="Ảnh vệ tinh">
+        <i class="fa-solid fa-satellite mr-1"></i> Satellite
+        </button>
+        <button onclick="setMapType('hybrid')" id="btn-hybrid" class="map-type-btn px-3 py-2 text-sm font-medium transition flex items-center" title="Vệ tinh + Nhãn">
+        <i class="fa-solid fa-layer-group mr-1"></i> Hybrid
+        </button>
+        <button onclick="setMapType('terrain')" id="btn-terrain" class="map-type-btn px-3 py-2 text-sm font-medium transition flex items-center" title="Địa hình">
+        <i class="fa-solid fa-mountain mr-1"></i> Terrain
+        </button>
+        </div>
 
         <div id="dashboard">
             <h3>📊 Real-time Status</h3>

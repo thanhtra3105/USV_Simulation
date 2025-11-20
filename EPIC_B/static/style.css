@@ -530,3 +530,32 @@ body {
   color: var(--color-text-dark);
   font-weight: 500;
 }
+
+/* Map Type Control Buttons - Ở dưới map */
+.map-type-btn {
+  background-color: white;
+  color: #666;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  border-right: 1px solid #e0e0e0;
+  transition: all 0.2s ease;
+}
+
+.map-type-btn:last-child {
+  border-right: none;
+}
+
+.map-type-btn:hover {
+  background-color: #f0f0f0;
+  color: var(--color-text-dark);
+}
+
+.map-type-btn.active {
+  background-color: var(--color-active);
+  color: white;
+}
+
+.map-type-btn i {
+  font-size: 14px;
+}

@@ -29,7 +29,7 @@ async function initMap() {
 
     let initLat = 16.0659092;  // Giá trị mặc định nếu đọc lỗi
     let initLon = 108.1609844;
-
+4
     if (data.success && data.lat && data.lon) {
       initLat = data.lat;
       initLon = data.lon;
@@ -42,7 +42,8 @@ async function initMap() {
     map = new google.maps.Map(document.getElementById("map"), {
       center: { lat: initLat, lng: initLon },
       zoom: 17,
-      gestureHandling: "greedy"
+      gestureHandling: "greedy",
+      // mapTypeId: "satellite"
     });
 
     // Cho phép click thêm waypoint
@@ -53,6 +54,7 @@ async function initMap() {
   } catch (err) {
     console.error("Failed while get gps:", err);
   }
+  loadMissionFromPX4();
 }
 
 
@@ -198,6 +200,23 @@ let boatIcon = {
   anchor: new google.maps.Point(20, 20)     // tâm icon nằm ở giữa
 };
 
+// Hàm chuyển đổi loại bản đồ
+function setMapType(mapType) {
+  if (!map) return;
+  
+  // Đổi mapTypeId
+  map.setMapTypeId(mapType);
+  
+  // Cập nhật trạng thái nút active
+  const buttons = document.querySelectorAll('.map-type-btn');
+  buttons.forEach(btn => btn.classList.remove('active'));
+  
+  const activeBtn = document.getElementById(`btn-${mapType}`);
+  if (activeBtn) {
+    activeBtn.classList.add('active');
+  }
+}
+
 async function updateDashboard() {
   try {
     const res = await fetch("/vehicle-info");
@@ -298,6 +317,41 @@ function updateVehiclePosition() {
       }
     })
     .catch(err => console.error("Position update failed:", err));
+}
+
+async function loadMissionFromPX4() {
+    try {
+        const res = await fetch("/get-mission");
+        const data = await res.json();
+
+        if (!data.success) return;
+
+        const mission = data.mission;
+
+        mission.forEach(wp => {
+            let pos = new google.maps.LatLng(wp.lat, wp.lng);
+
+            let marker = new google.maps.Marker({
+                position: pos,
+                map: map,
+                label: `${markers.length + 1}`,
+                draggable: true
+            });
+
+            markers.push(marker);
+            waypoints.push({
+                lat: wp.lat,
+                lng: wp.lng,
+                speed: 1.0,
+                hold_time: 2
+            });
+        });
+
+        drawPolyline();
+
+    } catch (err) {
+        console.error("Load mission failed:", err);
+    }
 }
 
 // gọi update liên tục mỗi 2 giây

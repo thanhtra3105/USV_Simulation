@@ -75,6 +75,27 @@ def send_mission_via_mavlink(master, mission):
     else:
         return {"success": False, "message": "No MISSION_ACK received"}
 
+def get_mission(master):
+    master.mav.mission_request_list_send(master.target_system, master.target_component)
+    mission = []
+    count = None
+
+    while True:
+        msg = master.recv_match(blocking=True)
+        t = msg.get_type()
+
+        if t == "MISSION_COUNT":
+            count = msg.count
+            master.mav.mission_request_int_send(master.target_system, master.target_component, 0)
+
+        elif t == "MISSION_ITEM_INT":
+            mission.append(msg)
+            if msg.seq + 1 < count:
+                master.mav.mission_request_int_send(master.target_system, master.target_component, msg.seq + 1)
+            else:
+                break
+
+    return mission
 # =============================
 # API endpoints
 # =============================
@@ -86,52 +107,6 @@ def home():
 def telemetry():
     return render_template("dashboard.html")
 
-# ----------------Stream video ------------
-
-# def gen_frames():
-#     # global frame_count, curent_time, prev_time
-#     try:
-        
-#         global camera
-#         camera.close()
-#     except Exception:
-#         pass
-#     # Khởi tạo camera
-#     camera = Picamera2()
-#     camera.configure(camera.create_preview_configuration(main={"size": (640, 480)}))
-#     camera.start()
-#     frame_count = 0
-#     prev_time = time.time()
-#     fps = 1
-#     while True:
-#         frame = camera.capture_array()
-#         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-#         # --- Tính FPS mỗi 1 giây ---
-#         frame_count += 1
-#         current_time = time.time()
-#         elapsed = current_time - prev_time
-#         if elapsed >= 1.0:
-#             fps = frame_count / elapsed
-#             frame_count = 0
-#             prev_time = current_time
-
-#         # --- Vẽ FPS lên khung hình ---
-#         cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
-#                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-#         _, buffer = cv2.imencode('.jpg', frame)
-#         yield (b'--frame\r\n'
-#                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-
-# @app.route('/video_feed')
-# def video_feed():
-#     return Response(gen_frames(),
-#                     mimetype='multipart/x-mixed-replace; boundary=frame')
-
-
-# @app.route("/stream", methods=["GET"])
-# def stream():
-#     return render_template("stream.html")
 
 sensor_data = {
     "ph" : None,
@@ -308,6 +283,117 @@ def misson_progress():
                 })
     except Exception as e:
         return jsonify({"success": False, "message": f"Get mission failed: {e}"}), 500
+
+@app.route("/get-mission", methods=["GET"])
+def api_get_mission():
+    try:
+        master = get_master()
+        with mavlink_lock:
+            mission_items = get_mission(master)
+
+        mission_list = []
+        for wp in mission_items:
+            mission_list.append({
+                "seq": wp.seq,
+                "lat": wp.x / 1e7,
+                "lng": wp.y / 1e7,
+                "alt": wp.z
+            })
+
+        return jsonify({"success": True, "mission": mission_list})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+@app.route("/set-speed", methods=["POST"])
+def set_speed():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "message": "Missing payload"}), 400
+
+        vx = data.get("vx", 0.0)
+        vy = data.get("vy", 0.0)
+        vz = data.get("vz", 0.0)
+        yaw_rate = data.get("yaw_rate", 0.0)
+
+        master = get_master()
+
+        # ===== SEND VELOCITY SETPOINT =====
+        master.mav.set_position_target_local_ned_send(
+            int(time.time() * 1000),         # time_boot_ms
+            master.target_system,
+            master.target_component,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            0b0000110111000111,             # type_mask
+            0, 0, 0,                         # position ignored
+            vx, vy, vz,                      # velocity in m/s
+            0, 0, 0,                         # acceleration ignored
+            0, yaw_rate                      # yaw, yaw_rate
+        )
+
+        return jsonify({
+            "success": True,
+            "message": "Velocity command sent",
+            "vx": vx, "vy": vy, "vz": vz, "yaw_rate": yaw_rate
+        })
+
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Send speed failed: {e}"}), 500
+
+@app.route("/set-offboard", methods=["POST"])
+def set_offboard():
+    try:
+        master = get_master()
+
+        # ===============================
+        # 1) Gửi 1 velocity setpoint dummy
+        #    PX4 yêu cầu phải gửi BEFORE vào offboard
+        # ===============================
+
+        time_boot_ms = int(time.time() * 1000) & 0xFFFFFFFF
+        master.mav.set_position_target_local_ned_send(
+            time_boot_ms,
+            master.target_system,
+            master.target_component,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            0b0000110111000111,   # velocity only
+            0, 0, 0,
+            0.0, 0.0, 0.0,         # dummy vx, vy, vz
+            0, 0, 0,
+            0, 0
+        )
+
+        # ===============================
+        # 2) Chuyển mode sang OFFBOARD
+        # ===============================
+        master.mav.command_long_send(
+            master.target_system,
+            master.target_component,
+            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+            0,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,  # param1
+            6, 0, 0, 0, 0, 0     # param2 = PX4 offboard mode = 6
+        )
+
+        # ===============================
+        # 3) Đợi PX4 confirm
+        # ===============================
+        ack = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
+        if not ack:
+            return jsonify({"success": False, "message": "No COMMAND_ACK received"})
+
+        if ack.result != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+            return jsonify({
+                "success": False,
+                "message": f"OFFBOARD rejected: {ack.result}"
+            })
+
+        print(">>> PX4 switched to OFFBOARD")
+
+        return jsonify({"success": True, "message": "Switched to OFFBOARD mode"})
+
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Failed: {e}"}), 500
 
 # =============================
 # Main
