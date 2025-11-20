@@ -109,7 +109,7 @@ def write_with_header(filename, header, rows):
 
 
 def log_rtt(command, rtt, success):
-    with open("logs/command_rtt/command_rtt.csv", "a", newline="") as f:
+    with open("logs/command_rtt/command_rtt.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow([datetime.now(), command, rtt, success])
 
