@@ -3,6 +3,11 @@ from pymavlink import mavutil
 import os, time
 from flask_cors import CORS
 from threading import Lock
+import csv
+from datetime import datetime
+
+import statistics
+
 mavlink_lock = Lock()
 polling_enabled = True
 
@@ -17,6 +22,82 @@ VEHICLE_BAUD = 57600
 ACK_TIMEOUT = 10
 
 master = None
+
+# =========================================
+# Logging Functions (ghi log CSV phân tích)
+# =========================================
+
+import os
+import csv
+from datetime import datetime
+import threading
+import time
+
+MAX_LOG_LINES = 100
+log_buffer = {
+    "vehicle-position": [],
+    "vehicle-info": [],
+    "mission-progress": []
+}
+
+
+def add_latency_sample(endpoint, latency, status="success"):
+    global log_buffer
+    log_buffer[endpoint].append([datetime.now(), endpoint, latency, status])
+    if len(log_buffer) > MAX_LOG_LINES:
+        log_buffer[endpoint] = log_buffer[endpoint][-MAX_LOG_LINES:]
+
+def flush_log_buffer():
+    global log_buffer
+    while True:
+        time.sleep(2)  # ghi file mỗi 2 giây
+        if log_buffer["vehicle-position"]:
+            with open(f"logs/api_latency/position_latency.csv", "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerows(log_buffer["vehicle-position"])
+        if log_buffer["vehicle-info"]:
+            with open(f"logs/api_latency/vehicle_info_latency.csv", "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerows(log_buffer["vehicle-info"])
+        if log_buffer["mission-progress"]:
+            with open(f"logs/api_latency/mission_progress_latency.csv", "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerows(log_buffer["mission-progress"])
+
+
+
+# def log_latency(filename, endpoint, latency, status="success"):
+#     file_path = f"logs/api_latency/{filename}.csv"
+#     rows = []
+
+#     # 1) Đọc file hiện tại nếu tồn tại
+#     if os.path.exists(file_path):
+#         with open(file_path, "r", newline="") as f:
+#             reader = csv.reader(f)
+#             rows = list(reader)
+
+#     # 2) Thêm dòng mới
+#     rows.append([datetime.now(), endpoint, latency, status])
+
+#     # 3) Giữ tối đa MAX_LOG_LINES
+#     if len(rows) > MAX_LOG_LINES:
+#         rows = rows[-MAX_LOG_LINES:]  # lấy 100 dòng cuối
+
+#     # 4) Ghi lại file
+#     with open(file_path, "w", newline="") as f:
+#         writer = csv.writer(f)
+#         writer.writerows(rows)
+
+
+def log_rtt(command, rtt, success):
+    with open("logs/command_rtt.csv", "a", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([datetime.now(), command, rtt, success])
+
+def log_telemetry_loss(received, total):
+    with open("logs/telemetry_loss.csv", "a", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([datetime.now(), received, total])
 
 
 # =============================
@@ -49,11 +130,11 @@ def send_mission_via_mavlink(master, mission):
 
     master.mav.mission_count_send(master.target_system, master.target_component, wp_count)
     print(f"Sending MISSION_COUNT={wp_count}")
+
     for seq, wp in enumerate(mission):
         lat = int(wp["lat"] * 1e7)
         lon = int(wp["lng"] * 1e7)
         alt = 0
-        # hold_time = wp.get("hold_time", 0)
 
         master.mav.mission_item_int_send(
             master.target_system,
@@ -61,18 +142,24 @@ def send_mission_via_mavlink(master, mission):
             seq,
             mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
             mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
-            0, 1,  # current, autocontinue
+            0, 1,
             5, 0, 0, 0,
             lat, lon, alt
         )
         print(f"Sent WP {seq+1}: lat={wp['lat']}, lon={wp['lng']}")
-    
-    msg = master.recv_match(type="MISSION_ACK", blocking=True, timeout=1)
-    time.sleep(1)
+
+    # ======================
+    # MEASURE RTT: SEND → ACK
+    # ======================
+    start = time.perf_counter()
+    msg = master.recv_match(type="MISSION_ACK", blocking=True, timeout=2)
+    rtt = (time.perf_counter() - start) * 1000
+
     if msg:
-        print(f"Got final MISSION_ACK: {msg}")
+        log_rtt("MISSION_ACK", rtt, True)
         return {"success": True, "message": "Mission upload complete", "ack": msg.to_dict()}
     else:
+        log_rtt("MISSION_ACK", rtt, False)
         return {"success": False, "message": "No MISSION_ACK received"}
 
 def get_mission(master):
@@ -197,21 +284,35 @@ def start_mission():
         return jsonify({"success": False, "message": f"Start mission failed: {e}"}), 500
 
 @app.route("/vehicle-position", methods=["GET"])
+@app.route("/vehicle-position", methods=["GET"])
 def vehicle_position():
     try:
         master = get_master()
         with mavlink_lock:
             if not polling_enabled:
                 return jsonify({"success": False, "message": "Busy uploading mission"}), 503
+
+            # ===== Xóa message GLOBAL_POSITION_INT cũ trong buffer =====
+            while master.recv_match(type="GLOBAL_POSITION_INT", blocking=False):
+                pass
+
+            # ===== Bắt đầu đo từ khi gửi request tới PX4 =====
+            start = time.perf_counter()
             msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=5)
+            latency_ms = (time.perf_counter() - start) * 1000  # tính latency
+
             if not msg:
+                add_latency_sample("vehicle-position", latency_ms, "error")
                 return jsonify({"success": False, "message": "No GPS data"}), 500
 
+            # ===== Parse dữ liệu =====
             pos = msg.to_dict()
             lat = pos["lat"] / 1e7
             lon = pos["lon"] / 1e7
             alt = pos["alt"] / 1000.0
-            # print(f"lat: {lat}, lon:{lon}");
+
+            add_latency_sample("vehicle-position", latency_ms)
+
             return jsonify({
                 "success": True,
                 "lat": lat,
@@ -220,7 +321,6 @@ def vehicle_position():
             })
     except Exception as e:
         return jsonify({"success": False, "message": f"Position failed: {e}"}), 500
-
 
 @app.route("/vehicle-info", methods=["GET"])
 def vehicle_info():
@@ -238,7 +338,7 @@ def vehicle_info():
             speed = msg_speed_heading.groundspeed
             heading = msg_speed_heading.heading
 
-            print(battery_remaining)
+            # print(battery_remaining)
             return jsonify({
                 "success": True,
                 "battery": battery_remaining,
@@ -263,7 +363,7 @@ def misson_progress():
             msg = master.recv_match(type="MISSION_CURRENT", blocking=True, timeout=2)
         
             if msg:
-                print(msg)
+                # print(msg)
                 mission_current = msg.seq+1
                 mission_total = msg.total
                 mission_state = msg.mission_state
@@ -304,99 +404,10 @@ def api_get_mission():
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 
-@app.route("/set-speed", methods=["POST"])
-def set_speed():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"success": False, "message": "Missing payload"}), 400
-
-        vx = data.get("vx", 0.0)
-        vy = data.get("vy", 0.0)
-        vz = data.get("vz", 0.0)
-        yaw_rate = data.get("yaw_rate", 0.0)
-
-        master = get_master()
-
-        # ===== SEND VELOCITY SETPOINT =====
-        master.mav.set_position_target_local_ned_send(
-            int(time.time() * 1000),         # time_boot_ms
-            master.target_system,
-            master.target_component,
-            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-            0b0000110111000111,             # type_mask
-            0, 0, 0,                         # position ignored
-            vx, vy, vz,                      # velocity in m/s
-            0, 0, 0,                         # acceleration ignored
-            0, yaw_rate                      # yaw, yaw_rate
-        )
-
-        return jsonify({
-            "success": True,
-            "message": "Velocity command sent",
-            "vx": vx, "vy": vy, "vz": vz, "yaw_rate": yaw_rate
-        })
-
-    except Exception as e:
-        return jsonify({"success": False, "message": f"Send speed failed: {e}"}), 500
-
-@app.route("/set-offboard", methods=["POST"])
-def set_offboard():
-    try:
-        master = get_master()
-
-        # ===============================
-        # 1) Gửi 1 velocity setpoint dummy
-        #    PX4 yêu cầu phải gửi BEFORE vào offboard
-        # ===============================
-
-        time_boot_ms = int(time.time() * 1000) & 0xFFFFFFFF
-        master.mav.set_position_target_local_ned_send(
-            time_boot_ms,
-            master.target_system,
-            master.target_component,
-            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-            0b0000110111000111,   # velocity only
-            0, 0, 0,
-            0.0, 0.0, 0.0,         # dummy vx, vy, vz
-            0, 0, 0,
-            0, 0
-        )
-
-        # ===============================
-        # 2) Chuyển mode sang OFFBOARD
-        # ===============================
-        master.mav.command_long_send(
-            master.target_system,
-            master.target_component,
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            0,
-            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,  # param1
-            6, 0, 0, 0, 0, 0     # param2 = PX4 offboard mode = 6
-        )
-
-        # ===============================
-        # 3) Đợi PX4 confirm
-        # ===============================
-        ack = master.recv_match(type='COMMAND_ACK', blocking=True, timeout=3)
-        if not ack:
-            return jsonify({"success": False, "message": "No COMMAND_ACK received"})
-
-        if ack.result != mavutil.mavlink.MAV_RESULT_ACCEPTED:
-            return jsonify({
-                "success": False,
-                "message": f"OFFBOARD rejected: {ack.result}"
-            })
-
-        print(">>> PX4 switched to OFFBOARD")
-
-        return jsonify({"success": True, "message": "Switched to OFFBOARD mode"})
-
-    except Exception as e:
-        return jsonify({"success": False, "message": f"Failed: {e}"}), 500
-
 # =============================
 # Main
 # =============================
 if __name__ == "__main__":
+    threading.Thread(target=flush_log_buffer, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False)
+
