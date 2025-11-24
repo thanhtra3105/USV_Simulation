@@ -5,8 +5,10 @@ from flask_cors import CORS
 from threading import Lock
 import csv
 from datetime import datetime
+from datetime import datetime
+import threading
+from mavlink_logger import start_mavlink_logger
 
-import statistics
 
 mavlink_lock = Lock()
 polling_enabled = True
@@ -22,16 +24,6 @@ VEHICLE_BAUD = 57600
 ACK_TIMEOUT = 10
 
 master = None
-
-# =========================================
-# Logging Functions (ghi log CSV phân tích)
-# =========================================
-
-import os
-import csv
-from datetime import datetime
-import threading
-import time
 
 MAX_LOG_LINES = 100
 log_buffer = {
@@ -53,6 +45,17 @@ packet_stats = {
     "mission-progress": {"sent": 0, "received": 0}
 }
 
+shared_data = {
+    "lat": None,
+    "lon": None,
+    "alt": None,
+    "speed": None,
+    "heading": None,
+    "battery": None,
+    "mission_curr": None,
+    "mission_total": None,
+}
+
 
 def add_latency_sample(endpoint, latency, status="success"):
     global log_buffer, packet_stats
@@ -66,26 +69,6 @@ def add_latency_sample(endpoint, latency, status="success"):
     if len(log_buffer[endpoint]) > MAX_LOG_LINES:
         log_buffer[endpoint] = log_buffer[endpoint][-MAX_LOG_LINES:]
 
-
-# def flush_log_buffer():
-#     global log_buffer
-#     while True:
-#         time.sleep(2)
-
-#         # ----- VEHICLE POSITION -----
-#         if log_buffer["vehicle-position"]:
-#             filename = "logs/api_latency/position_latency.csv"
-#             write_with_header(filename, HEADERS["vehicle-position"], log_buffer["vehicle-position"])
-
-#         # ----- VEHICLE INFO -----
-#         if log_buffer["vehicle-info"]:
-#             filename = "logs/api_latency/vehicle_info_latency.csv"
-#             write_with_header(filename, HEADERS["vehicle-info"], log_buffer["vehicle-info"])
-
-#         # ----- MISSION PROGRESS -----
-#         if log_buffer["mission-progress"]:
-#             filename = "logs/api_latency/mission_progress_latency.csv"
-#             write_with_header(filename, HEADERS["mission-progress"], log_buffer["mission-progress"])
 
 def flush_log_buffer():
     global log_buffer
@@ -130,6 +113,43 @@ def log_packet_loss(endpoint):
             writer.writerow(["timestamp", "received", "total", "loss_ratio"])
         writer.writerow([datetime.now(), received, total, loss_ratio])
 
+def logger_px4data():
+    os.makedirs("logs/px4_data", exist_ok=True)
+    file = open("logs/px4_data/px4_data_log.csv", "w", newline="")
+    writer = csv.writer(file)
+
+    writer.writerow([
+        "timestamp", "lat", "lon", "alt",
+        "speed", "heading",
+        "battery", "mission_current", "mission_total"
+    ])
+
+    required_fields = ["lat", "lon", "alt", "speed", "heading", "battery", "mission_curr", "mission_total"]
+
+    # Kiểm tra thiếu field hoặc None
+    
+        
+    while True:
+        valid = True
+        for key in required_fields:
+            if shared_data[key] is None:
+                valid = False
+                break
+        if valid is True:
+            writer.writerow([
+                time.time(),
+                shared_data["lat"],
+                shared_data["lon"],
+                shared_data["alt"],
+                shared_data["speed"],
+                shared_data["heading"],
+                shared_data["battery"],
+                shared_data["mission_curr"],
+                shared_data["mission_total"]
+            ])
+
+        file.flush()
+        time.sleep(0.5)   # log mỗi 500ms
 
 # =============================
 # Hàm kết nối MAVLink (giữ 1 kết nối global)
@@ -147,6 +167,8 @@ def get_master(timeout=10):
         except Exception as e:
             raise Exception(f"Kết nối thất bại: {e}")
     return master
+
+
 
 # =============================
 # Upload mission
@@ -321,30 +343,30 @@ def vehicle_position():
                 return jsonify({"success": False, "message": "Busy uploading mission"}), 503
 
             # ===== Xóa message GLOBAL_POSITION_INT cũ trong buffer =====
-            while master.recv_match(type="GLOBAL_POSITION_INT", blocking=False):
+            while master.recv_match(type="GPS_RAW_INT", blocking=False):
                 pass
 
             # ===== Bắt đầu đo từ khi gửi request tới PX4 =====
             start = time.perf_counter()
-            msg = master.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=5)
+            msg = master.recv_match(type="GPS_RAW_INT", blocking=True, timeout=5)
             latency_ms = (time.perf_counter() - start) * 1000  # tính latency
 
             if not msg:
                 add_latency_sample("vehicle-position", latency_ms, "error")
                 return jsonify({"success": False, "message": "No GPS data"}), 500
 
-            # ===== Parse dữ liệu =====
-            pos = msg.to_dict()
-            lat = pos["lat"] / 1e7
-            lon = pos["lon"] / 1e7
-            alt = pos["alt"] / 1000.0
+            shared_data["lat"] = msg.lat/ 1e7
+            shared_data["lon"] = msg.lon/ 1e7
+            shared_data["alt"] = msg.alt / 1000.0
             
+            print(shared_data["lat"])
             add_latency_sample("vehicle-position", latency_ms)
+            
             return jsonify({
                 "success": True,
-                "lat": lat,
-                "lon": lon,
-                "alt": alt
+                "lat": shared_data["lat"],
+                "lon": shared_data["lon"],
+                "alt": shared_data["alt"]
             })
     except Exception as e:
         add_latency_sample("vehicle-position", 0, "error")
@@ -373,17 +395,17 @@ def vehicle_info():
                 add_latency_sample("vehicle-info", latency_ms, "error")
                 return jsonify({"success": False, "message": "No vehicle data"}), 500
 
-            battery_remaining = msg_bat.battery_remaining
-            speed = msg_speed_heading.groundspeed
-            heading = msg_speed_heading.heading
+            shared_data["battery"] = msg_bat.battery_remaining
+            shared_data["speed"] = msg_speed_heading.groundspeed
+            shared_data["heading"]  = msg_speed_heading.heading
 
             add_latency_sample("vehicle-info", latency_ms)
 
             return jsonify({
                 "success": True,
-                "battery": battery_remaining,
-                "speed": speed,
-                "heading": heading,
+                "battery": shared_data["battery"],
+                "speed": shared_data["speed"],
+                "heading": shared_data["heading"]
             })
     except Exception as e:
         add_latency_sample("vehicle-info", 0, "error")
@@ -412,13 +434,14 @@ def misson_progress():
 
             if msg:
                 add_latency_sample("mission-progress", latency_ms)
-                mission_current = msg.seq + 1
-                mission_total = msg.total
+                shared_data["mission_curr"] = msg.seq + 1
+                shared_data["mission_total"] = msg.total
                 mission_state = msg.mission_state
+
                 return jsonify({
                     "success": True,
-                    "mission_current": mission_current,
-                    "mission_total": mission_total,
+                    "mission_current": shared_data["mission_curr"],
+                    "mission_total": shared_data["mission_total"],
                     "mission_state": mission_state,
                 })
             else:
@@ -430,7 +453,7 @@ def misson_progress():
                     "mission_state": mission_state,
                 })
     except Exception as e:
-        add_latency_sample("mission-progress", latency_ms, 'error')
+        add_latency_sample("mission-progress", 0, 'error')
         return jsonify({"success": False, "message": f"Get mission failed: {e}"}), 500
 
 @app.route("/get-mission", methods=["GET"])
@@ -458,5 +481,6 @@ def api_get_mission():
 # =============================
 if __name__ == "__main__":
     threading.Thread(target=flush_log_buffer, daemon=True).start()
+    threading.Thread(target=logger_px4data, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False)
 
